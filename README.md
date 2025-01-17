@@ -6,7 +6,7 @@ Please note that this is prototype code and generated entirely by Cursor AI base
 
 ## References
 - A [slightly modified](https://github.com/miklosbagi/govir/pull/2/files) version of [Marvin Kuanda's Go cursor rules](https://cursor.directory/go-api-standard-library-1-22)
-- [VirusTotal v3 API reference] (https://docs.virustotal.com/reference/overview)
+- [VirusTotal v3 API reference](https://docs.virustotal.com/reference/overview)
 - [Dockerfile reference](https://docs.docker.com/reference/dockerfile/)
 - [Compose file reference](https://docs.docker.com/reference/compose-file/)
 
