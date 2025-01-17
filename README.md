@@ -4,6 +4,13 @@ Shows user status about files and their analysis results.
 
 Please note that this is prototype code and generated entirely by Cursor AI based on various prompts, and it is far from being anything useful.
 
+## References
+- A [slightly modified](https://github.com/miklosbagi/govir/pull/2/files) version of [Marvin Kuanda's Go cursor rules](https://cursor.directory/go-api-standard-library-1-22)
+- [VirusTotal v3 API reference] (https://docs.virustotal.com/reference/overview)
+- [Dockerfile reference](https://docs.docker.com/reference/dockerfile/)
+- [Compose file reference](https://docs.docker.com/reference/compose-file/)
+
+
 ## Best prompt so far
 ```
 Build a Go CLI app that uploads files to Virus Total for analysis.
@@ -91,8 +98,3 @@ test2/svc2.exe (results link): clean
 
 The program should exit, when all the files requested received their complete report from Virustotal.
 ```
-
-## References used:
-- VirusTotal v3 API Documentation
-- Dockerfile documentation
-- Docker compose documentation
