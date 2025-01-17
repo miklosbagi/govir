@@ -1,0 +1,3 @@
+# VirusTotal API key
+# Get your API key from https://www.virustotal.com/
+api_key: "your-virustotal-api-key"
