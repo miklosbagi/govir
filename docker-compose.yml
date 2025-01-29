@@ -1,0 +1,12 @@
+version: "3.8"
+
+services:
+  govir:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      - VT_API_KEY=${VT_API_KEY}
+    volumes:
+      - .:/scan
+    working_dir: /scan
