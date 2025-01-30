@@ -1,4 +1,4 @@
-.PHONY: build run test dockerize clean
+.PHONY: build test clean run
 
 # Go parameters
 BINARY_NAME=govir
@@ -6,19 +6,15 @@ MAIN_FILE=main.go
 
 # Build the application
 build:
-	go build -o $(BINARY_NAME) $(MAIN_FILE)
+	go build -v ./...
 
 # Run the application
-run: build
-	./$(BINARY_NAME)
+run:
+	go run main.go $(ARGS)
 
 # Run tests
 test:
-	go test -v -race -cover ./...
-
-# Build docker image
-dockerize:
-	docker-compose build
+	go test -v ./...
 
 # Clean build artifacts
 clean:
@@ -35,3 +31,7 @@ lint:
 
 # All (build, test, and lint)
 all: deps lint test build
+
+# Build docker image
+docker-build:
+	docker build -t govir .

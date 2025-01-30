@@ -1,4 +1,4 @@
-FROM golang:1.22.0-alpine3.19 AS builder
+FROM golang:1.22-alpine AS builder
 
 WORKDIR /app
 
@@ -15,9 +15,9 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -o govir
+RUN go build -o govir
 
-FROM alpine:3.19
+FROM alpine:latest
 
 WORKDIR /app
 
@@ -27,4 +27,4 @@ COPY --from=builder /app/govir .
 # Create config directory
 RUN mkdir -p /app/config
 
-ENTRYPOINT ["/app/govir"]
+ENTRYPOINT ["./govir"]

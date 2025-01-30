@@ -14,7 +14,11 @@ import (
 	"time"
 )
 
-const defaultBaseURL = "https://www.virustotal.com/api/v3"
+const (
+	defaultBaseURL = "https://www.virustotal.com/api/v3"
+	// GuiBaseURL is the base URL for VirusTotal's web interface
+	GuiBaseURL = "https://www.virustotal.com/gui/file"
+)
 
 type Client struct {
 	apiKey     string
@@ -35,14 +39,17 @@ type UploadURLResponse struct {
 	Data string `json:"data"` // The upload URL is returned directly as a string
 }
 
-type ScanResponse struct {
-	Data struct {
-		Type  string `json:"type"`
-		ID    string `json:"id"`
-		Links struct {
-			Self string `json:"self"`
-		} `json:"links"`
-	} `json:"data"`
+type Analysis struct {
+	Status            string
+	Stats             Stats
+	LastAnalysisStats LastAnalysisStats
+	Detections        map[string]Detection
+}
+
+type Stats struct {
+	Harmless   int
+	Malicious  int
+	Suspicious int
 }
 
 type AnalysisStats struct {
@@ -211,135 +218,272 @@ func prettyJSON(data []byte) string {
 }
 
 func (c *Client) GetUploadURL(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.baseURL+"/files/upload_url", nil)
+	url := fmt.Sprintf("%s/files/upload_url", c.baseURL)
+
+	if c.debug {
+		c.debugLog("Getting upload URL from: %s", url)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("error creating request: %v", err)
 	}
 
 	req.Header.Set("x-apikey", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("getting upload URL: %w", err)
+		return "", fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		return "", c.handleErrorResponse(resp)
-	}
-
-	// Read and log the response body for debugging
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("reading response body: %w", err)
-	}
-	c.debugLog("Upload URL response:\n%s", prettyJSON(body))
-
-	var uploadResp UploadURLResponse
-	if err := json.Unmarshal(body, &uploadResp); err != nil {
-		return "", fmt.Errorf("decoding response: %w", err)
+		return "", fmt.Errorf("error reading response: %v", err)
 	}
 
-	return uploadResp.Data, nil
+	if c.debug {
+		c.debugLog("Upload URL response:\n%s", prettyJSON(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data string `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return "", fmt.Errorf("error parsing response: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Got upload URL: %s", result.Data)
+	}
+
+	return result.Data, nil
 }
 
-func (c *Client) UploadFile(ctx context.Context, uploadURL, filePath string) (string, error) {
-	file, err := os.Open(filePath)
+func (c *Client) UploadFile(ctx context.Context, uploadURL string, path string) (*Analysis, error) {
+	file, err := os.Open(path)
 	if err != nil {
-		return "", fmt.Errorf("opening file: %w", err)
+		return nil, fmt.Errorf("error opening file: %v", err)
 	}
 	defer file.Close()
 
+	fileInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("error getting file info: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Uploading file: %s (size: %d bytes)", path, fileInfo.Size())
+	}
+
+	// Create multipart form
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 
-	// Use just the base name of the file for the form field
-	filename := filepath.Base(filePath)
-	part, err := writer.CreateFormFile("file", filename)
+	// Create form file field
+	part, err := writer.CreateFormFile("file", filepath.Base(path))
 	if err != nil {
-		return "", fmt.Errorf("creating form file: %w", err)
+		return nil, fmt.Errorf("error creating form file: %v", err)
 	}
 
-	if _, err := io.Copy(part, file); err != nil {
-		return "", fmt.Errorf("copying file: %w", err)
+	// Copy file content
+	written, err := io.Copy(part, file)
+	if err != nil {
+		return nil, fmt.Errorf("error copying file content: %v", err)
 	}
-	writer.Close()
 
+	if c.debug {
+		c.debugLog("Copied %d bytes to form", written)
+	}
+
+	// Close multipart writer
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("error closing writer: %v", err)
+	}
+
+	// Create request
 	req, err := http.NewRequestWithContext(ctx, "POST", uploadURL, body)
 	if err != nil {
-		return "", fmt.Errorf("creating upload request: %w", err)
+		return nil, fmt.Errorf("error creating request: %v", err)
 	}
 
+	// Set headers
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("x-apikey", c.apiKey)
 
+	if c.debug {
+		c.debugLog("Making upload request to: %s", uploadURL)
+		c.debugLog("Content-Type: %s", writer.FormDataContentType())
+	}
+
+	// Send request
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("uploading file: %w", err)
+		return nil, fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// Read and log the response body for debugging
+	// Read response
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", fmt.Errorf("reading response body: %w", err)
+		return nil, fmt.Errorf("error reading response: %v", err)
 	}
-	c.debugLog("Upload response:\n%s", prettyJSON(respBody))
+
+	if c.debug {
+		c.debugLog("Upload response status: %d", resp.StatusCode)
+		c.debugLog("Upload response body:\n%s", prettyJSON(respBody))
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.Unmarshal(respBody, &errResp); err != nil {
-			return "", fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(respBody))
-		}
-		return "", fmt.Errorf("%s: %s", errResp.Error.Code, errResp.Error.Message)
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var scanResp ScanResponse
-	if err := json.Unmarshal(respBody, &scanResp); err != nil {
-		return "", fmt.Errorf("decoding response: %w", err)
+	var result struct {
+		Data struct {
+			ID   string `json:"id"`
+			Type string `json:"type"`
+		} `json:"data"`
 	}
 
-	return scanResp.Data.ID, nil
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("error parsing response: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Upload successful, analysis ID: %s", result.Data.ID)
+	}
+
+	return &Analysis{Status: "queued"}, nil
 }
 
-func (c *Client) GetAnalysis(ctx context.Context, id string) (*FileReport, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("%s/analyses/%s", c.baseURL, id), nil)
+func (c *Client) GetAnalysis(ctx context.Context, hash string) (*Analysis, error) {
+	url := fmt.Sprintf("%s/files/%s", c.baseURL, hash)
+
+	if c.debug {
+		c.debugLog("Getting analysis from: %s", url)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("error creating request: %v", err)
 	}
 
 	req.Header.Set("x-apikey", c.apiKey)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("getting analysis: %w", err)
+		return nil, fmt.Errorf("error making request: %v", err)
 	}
 	defer resp.Body.Close()
 
-	// Read and log the response body for debugging
-	body, err := io.ReadAll(resp.Body)
+	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("reading response body: %w", err)
+		return nil, fmt.Errorf("error reading response: %v", err)
 	}
-	c.debugLog("Analysis response:\n%s", prettyJSON(body))
+
+	if c.debug {
+		c.debugLog("Analysis response status: %d", resp.StatusCode)
+		c.debugLog("Analysis response body:\n%s", prettyJSON(respBody))
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		if c.debug {
+			c.debugLog("Analysis not found for hash: %s", hash)
+		}
+		return nil, fmt.Errorf("not found")
+	}
 
 	if resp.StatusCode != http.StatusOK {
-		var errResp ErrorResponse
-		if err := json.Unmarshal(body, &errResp); err != nil {
-			return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data struct {
+			Attributes struct {
+				Status string `json:"status"`
+				Stats  struct {
+					Harmless   int `json:"harmless"`
+					Malicious  int `json:"malicious"`
+					Suspicious int `json:"suspicious"`
+				} `json:"stats"`
+				LastAnalysisStats struct {
+					Harmless   int `json:"harmless"`
+					Malicious  int `json:"malicious"`
+					Suspicious int `json:"suspicious"`
+					Undetected int `json:"undetected"`
+					InProgress int `json:"in-progress"`
+					Failure    int `json:"failure"`
+				} `json:"last_analysis_stats"`
+				LastAnalysisResults map[string]struct {
+					Category   string `json:"category"`
+					Result     string `json:"result"`
+					Method     string `json:"method"`
+					EngineType string `json:"engine_type"`
+					EngineName string `json:"engine_name"`
+				} `json:"last_analysis_results"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("error parsing response: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Analysis status: %s", result.Data.Attributes.Status)
+		c.debugLog("Analysis stats - Harmless: %d, Malicious: %d, Suspicious: %d",
+			result.Data.Attributes.Stats.Harmless,
+			result.Data.Attributes.Stats.Malicious,
+			result.Data.Attributes.Stats.Suspicious)
+		c.debugLog("Last analysis stats - Harmless: %d, Malicious: %d, Suspicious: %d, Undetected: %d, InProgress: %d, Failure: %d",
+			result.Data.Attributes.LastAnalysisStats.Harmless,
+			result.Data.Attributes.LastAnalysisStats.Malicious,
+			result.Data.Attributes.LastAnalysisStats.Suspicious,
+			result.Data.Attributes.LastAnalysisStats.Undetected,
+			result.Data.Attributes.LastAnalysisStats.InProgress,
+			result.Data.Attributes.LastAnalysisStats.Failure)
+	}
+
+	detections := make(map[string]Detection)
+	for name, res := range result.Data.Attributes.LastAnalysisResults {
+		if res.Category == "malicious" || res.Category == "suspicious" {
+			detections[name] = Detection{
+				Category:   res.Category,
+				Result:     res.Result,
+				Method:     res.Method,
+				EngineType: res.EngineType,
+				EngineName: res.EngineName,
+			}
 		}
-		return nil, fmt.Errorf("%s: %s", errResp.Error.Code, errResp.Error.Message)
 	}
 
-	var report FileReport
-	if err := json.Unmarshal(body, &report); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-
-	return &report, nil
+	return &Analysis{
+		Status: result.Data.Attributes.Status,
+		Stats: Stats{
+			Harmless:   result.Data.Attributes.Stats.Harmless,
+			Malicious:  result.Data.Attributes.Stats.Malicious,
+			Suspicious: result.Data.Attributes.Stats.Suspicious,
+		},
+		LastAnalysisStats: LastAnalysisStats{
+			Harmless:   result.Data.Attributes.LastAnalysisStats.Harmless,
+			Malicious:  result.Data.Attributes.LastAnalysisStats.Malicious,
+			Suspicious: result.Data.Attributes.LastAnalysisStats.Suspicious,
+			Undetected: result.Data.Attributes.LastAnalysisStats.Undetected,
+			InProgress: result.Data.Attributes.LastAnalysisStats.InProgress,
+			Failure:    result.Data.Attributes.LastAnalysisStats.Failure,
+		},
+		Detections: detections,
+	}, nil
 }
 
-func (c *Client) AddComment(ctx context.Context, id, comment string) error {
+func (c *Client) AddComment(ctx context.Context, hash, comment string) error {
+	url := fmt.Sprintf("%s/files/%s/comments", c.baseURL, hash)
+
 	data := map[string]interface{}{
 		"data": map[string]interface{}{
 			"type": "comment",
@@ -348,79 +492,123 @@ func (c *Client) AddComment(ctx context.Context, id, comment string) error {
 			},
 		},
 	}
+
 	jsonData, err := json.Marshal(data)
 	if err != nil {
-		return fmt.Errorf("marshaling comment: %w", err)
+		return fmt.Errorf("marshaling comment: %v", err)
 	}
 
-	retryConfig := DefaultRetryConfig
-	currentDelay := retryConfig.InitialDelay
-
-	for attempt := 1; attempt <= retryConfig.MaxAttempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, "POST",
-			fmt.Sprintf("%s/files/%s/comments", c.baseURL, id),
-			bytes.NewBuffer(jsonData))
-		if err != nil {
-			return fmt.Errorf("creating request: %w", err)
-		}
-
-		req.Header.Set("x-apikey", c.apiKey)
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return fmt.Errorf("adding comment: %w", err)
-		}
-
-		body, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return fmt.Errorf("reading response body: %w", err)
-		}
-		c.debugLog("Add comment response (attempt %d/%d):\n%s",
-			attempt, retryConfig.MaxAttempts, prettyJSON(body))
-
-		if resp.StatusCode == http.StatusOK {
-			return nil
-		}
-
-		var errResp ErrorResponse
-		if err := json.Unmarshal(body, &errResp); err != nil {
-			return &VTError{
-				Code:       ErrUnknown,
-				Message:    string(body),
-				StatusCode: resp.StatusCode,
-				Retryable:  isRetryableError(resp.StatusCode),
-			}
-		}
-
-		vtErr := &VTError{
-			Code:       VTErrorCode(errResp.Error.Code),
-			Message:    errResp.Error.Message,
-			StatusCode: resp.StatusCode,
-			Retryable:  isRetryableError(resp.StatusCode),
-		}
-
-		// If it's an AlreadyExistsError, we can consider this a success
-		if vtErr.IsAlreadyExists() {
-			return nil
-		}
-
-		if !vtErr.Retryable || attempt == retryConfig.MaxAttempts {
-			return vtErr
-		}
-
-		// Apply exponential backoff
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(currentDelay):
-			currentDelay = time.Duration(float64(currentDelay) * retryConfig.BackoffMultiplier)
-			if currentDelay > retryConfig.MaxDelay {
-				currentDelay = retryConfig.MaxDelay
-			}
-		}
+	if c.debug {
+		c.debugLog("Adding comment to %s", url)
+		c.debugLog("Comment data:\n%s", prettyJSON(jsonData))
 	}
 
-	return fmt.Errorf("max retry attempts reached")
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return fmt.Errorf("creating request: %v", err)
+	}
+
+	req.Header.Set("x-apikey", c.apiKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("reading response: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Comment response status: %d", resp.StatusCode)
+		c.debugLog("Comment response body:\n%s", prettyJSON(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	return nil
+}
+
+type LastAnalysisStats struct {
+	Harmless   int
+	Malicious  int
+	Suspicious int
+	Undetected int
+	InProgress int
+	Failure    int
+}
+
+type Detection struct {
+	Category   string
+	Result     string
+	Method     string
+	EngineType string `json:"engine_type"`
+	EngineName string `json:"engine_name"`
+}
+
+type Comment struct {
+	Data struct {
+		Attributes struct {
+			Text string `json:"text"`
+		} `json:"attributes"`
+	} `json:"data"`
+}
+
+func (c *Client) GetComments(ctx context.Context, hash string) ([]string, error) {
+	url := fmt.Sprintf("%s/files/%s/comments", c.baseURL, hash)
+
+	if c.debug {
+		c.debugLog("Getting comments from: %s", url)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("creating request: %v", err)
+	}
+
+	req.Header.Set("x-apikey", c.apiKey)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("making request: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("reading response: %v", err)
+	}
+
+	if c.debug {
+		c.debugLog("Comments response status: %d", resp.StatusCode)
+		c.debugLog("Comments response body:\n%s", prettyJSON(respBody))
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var result struct {
+		Data []struct {
+			Attributes struct {
+				Text string `json:"text"`
+			} `json:"attributes"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("parsing response: %v", err)
+	}
+
+	comments := make([]string, 0, len(result.Data))
+	for _, comment := range result.Data {
+		comments = append(comments, comment.Attributes.Text)
+	}
+
+	return comments, nil
 }
